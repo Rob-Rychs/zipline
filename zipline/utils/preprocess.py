@@ -3,12 +3,13 @@ Utilities for validating inputs to user-facing API functions.
 """
 from textwrap import dedent
 from types import CodeType
-from functools import wraps
 from inspect import getargspec
 from uuid import uuid4
 
 from toolz.curried.operator import getitem
 from six import viewkeys, exec_, PY3
+
+from zipline.utils.compat import wraps
 
 
 _code_argorder = (
@@ -48,8 +49,8 @@ def preprocess(*_unused, **processors):
         `argname` is the name of the argument we're processing.
         `argvalue` is the value of the argument we're processing.
 
-    Usage
-    -----
+    Examples
+    --------
     >>> def _ensure_tuple(func, argname, arg):
     ...     if isinstance(arg, tuple):
     ...         return argvalue
@@ -84,26 +85,19 @@ def preprocess(*_unused, **processors):
         if defaults is None:
             defaults = ()
         no_defaults = (NO_DEFAULT,) * (len(args) - len(defaults))
-        args_defaults = zip(args, no_defaults + defaults)
-
-        argset = set(args)
-
-        # These assumptions simplify the implementation significantly.  If you
-        # really want to validate a *args/**kwargs function, you'll have to
-        # implement this here or do it yourself.
+        args_defaults = list(zip(args, no_defaults + defaults))
         if varargs:
-            raise TypeError(
-                "Can't validate functions that take *args: %s" % argspec
-            )
+            args_defaults.append((varargs, NO_DEFAULT))
         if varkw:
-            raise TypeError(
-                "Can't validate functions that take **kwargs: %s" % argspec
-            )
+            args_defaults.append((varkw, NO_DEFAULT))
+
+        argset = set(args) | {varargs, varkw} - {None}
 
         # Arguments can be declared as tuples in Python 2.
         if not all(isinstance(arg, str) for arg in args):
             raise TypeError(
-                "Can't validate functions using tuple unpacking: %s" % argspec
+                "Can't validate functions using tuple unpacking: %s" %
+                (argspec,)
             )
 
         # Ensure that all processors map to valid names.
@@ -113,7 +107,9 @@ def preprocess(*_unused, **processors):
                 "Got processors for unknown arguments: %s." % bad_names
             )
 
-        return _build_preprocessed_function(f, processors, args_defaults)
+        return _build_preprocessed_function(
+            f, processors, args_defaults, varargs, varkw,
+        )
     return _decorator
 
 
@@ -129,8 +125,8 @@ def call(f):
     f : function
         Function accepting a single argument and returning a replacement.
 
-    Usage
-    -----
+    Examples
+    --------
     >>> @preprocess(x=call(lambda x: x + 1))
     ... def foo(x):
     ...     return x
@@ -144,7 +140,11 @@ def call(f):
     return processor
 
 
-def _build_preprocessed_function(func, processors, args_defaults):
+def _build_preprocessed_function(func,
+                                 processors,
+                                 args_defaults,
+                                 varargs,
+                                 varkw):
     """
     Build a preprocessed function with the same signature as `func`.
 
@@ -172,13 +172,21 @@ def _build_preprocessed_function(func, processors, args_defaults):
     signature = []
     call_args = []
     assignments = []
+    star_map = {
+        varargs: '*',
+        varkw: '**',
+    }
+
+    def name_as_arg(arg):
+        return star_map.get(arg, '') + arg
+
     for arg, default in args_defaults:
         if default is NO_DEFAULT:
-            signature.append(arg)
+            signature.append(name_as_arg(arg))
         else:
             default_name = default_name_template % defaults_seen
             exec_globals[default_name] = default
-            signature.append('='.join([arg, default_name]))
+            signature.append('='.join([name_as_arg(arg), default_name]))
             defaults_seen += 1
 
         if arg in processors:
@@ -186,7 +194,7 @@ def _build_preprocessed_function(func, processors, args_defaults):
             exec_globals[procname] = processors[arg]
             assignments.append(make_processor_assignment(arg, procname))
 
-        call_args.append(arg + '=' + arg)
+        call_args.append(name_as_arg(arg))
 
     exec_str = dedent(
         """\

@@ -1,31 +1,26 @@
-Zipline
-=======
+.. image:: https://media.quantopian.com/logos/open_source/zipline-logo-03_.png
+    :target: http://www.zipline.io
+    :width: 212px
+    :align: center
+    :alt: Zipline
+
+=============
 
 |Gitter|
 |version status|
-|downloads|
-|build status|
+|travis status|
+|appveyor status|
 |Coverage Status|
-|Code quality|
 
 Zipline is a Pythonic algorithmic trading library. It is an event-driven
-system that supports both backtesting and live-trading.
-
-Zipline is currently used in production as the backtesting and live-trading
+system that supports both backtesting and live-trading. Zipline is currently used in production as the backtesting and live-trading
 engine powering `Quantopian <https://www.quantopian.com>`_ -- a free,
 community-centered, hosted platform for building and executing trading
 strategies.
 
-`Join our
-community! <https://groups.google.com/forum/#!forum/zipline>`_
-
-`Documentation <http://www.zipline.io>`_
-
-Want to contribute? See our `open
-requests <https://github.com/quantopian/zipline/wiki/Contribution-Requests>`_
-and our `general
-guidelines <https://github.com/quantopian/zipline#contributions>`_
-below.
+- `Join our community! <https://groups.google.com/forum/#!forum/zipline>`_
+- `Documentation <http://www.zipline.io>`_
+- Want to contribute? See our `development guidelines <http://zipline.io/development-guidelines.html>`_
 
 Features
 ========
@@ -89,42 +84,33 @@ Once set up, you can install Zipline from our ``Quantopian`` channel:
 
 .. code-block:: bash
 
-    conda install -c Quantopian zipline
+    $ conda install -c Quantopian zipline
 
 Currently supported platforms include:
 
 -  GNU/Linux 64-bit
 -  OSX 64-bit
+-  Windows 64-bit
 
 .. note::
 
-   Windows may work; however, it is currently untested.
+   Windows 32-bit may work; however, it is not currently included in
+   continuous integration tests.
 
 Quickstart
 ==========
 
-See our `getting started
-tutorial <http://www.zipline.io/#quickstart>`_.
+See our `getting started tutorial <http://www.zipline.io/beginner-tutorial.html>`_.
 
 The following code implements a simple dual moving average algorithm.
 
 .. code:: python
 
-    from zipline.api import (
-        add_history,
-        history,
-        order_target,
-        record,
-        symbol,
-    )
-
+    from zipline.api import order_target, record, symbol
 
     def initialize(context):
-        # Register 2 histories that track daily prices,
-        # one with a 100 window and one with a 300 day window
-        add_history(100, '1d', 'price')
-        add_history(300, '1d', 'price')
         context.i = 0
+        context.asset = symbol('AAPL')
 
 
     def handle_data(context, data):
@@ -134,57 +120,65 @@ The following code implements a simple dual moving average algorithm.
             return
 
         # Compute averages
-        # history() has to be called with the same params
+        # data.history() has to be called with the same params
         # from above and returns a pandas dataframe.
-        short_mavg = history(100, '1d', 'price').mean()
-        long_mavg = history(300, '1d', 'price').mean()
-
-        sym = symbol('AAPL')
+        short_mavg = data.history(context.asset, 'price', bar_count=100, frequency="1d").mean()
+        long_mavg = data.history(context.asset, 'price', bar_count=300, frequency="1d").mean()
 
         # Trading logic
-        if short_mavg[sym] > long_mavg[sym]:
+        if short_mavg > long_mavg:
             # order_target orders as many shares as needed to
             # achieve the desired number of shares.
-            order_target(sym, 100)
-        elif short_mavg[sym] < long_mavg[sym]:
-            order_target(sym, 0)
+            order_target(context.asset, 100)
+        elif short_mavg < long_mavg:
+            order_target(context.asset, 0)
 
         # Save values for later inspection
-        record(AAPL=data[sym].price,
-               short_mavg=short_mavg[sym],
-               long_mavg=long_mavg[sym])
+        record(AAPL=data.current(context.asset, 'price'),
+               short_mavg=short_mavg,
+               long_mavg=long_mavg)
+
 
 You can then run this algorithm using the Zipline CLI. From the command
 line, run:
 
 .. code:: bash
 
-    python run_algo.py -f dual_moving_average.py --symbols AAPL --start 2011-1-1 --end 2012-1-1 -o dma.pickle
+    $ zipline ingest
+    $ zipline run -f dual_moving_average.py --start 2011-1-1 --end 2012-1-1 -o dma.pickle
 
-This will download the AAPL price data from Yahoo! Finance in the
+This will download the AAPL price data from `quantopian-quandl` in the
 specified time range and stream it through the algorithm and save the
 resulting performance dataframe to dma.pickle which you can then load
-and analyze from within python.
+and analyze from within Python.
 
-You can find other examples in the zipline/examples directory.
+You can find other examples in the ``zipline/examples`` directory.
 
-Contributions
-=============
+Questions?
+==========
 
-If you would like to contribute, please see our Contribution Requests:
-https://github.com/quantopian/zipline/wiki/Contribution-Requests
+If you find a bug, feel free to `open an issue <https://github.com/quantopian/zipline/issues/new>`_ and fill out the issue template.
+
+Contributing
+============
+
+All contributions, bug reports, bug fixes, documentation improvements, enhancements, and ideas are welcome. Details on how to set up a development environment can be found in our `development guidelines <http://zipline.io/development-guidelines.html>`_.
+
+If you are looking to start working with the Zipline codebase, navigate to the GitHub `issues` tab and start looking through interesting issues. Sometimes there are issues labeled as `Beginner Friendly <https://github.com/quantopian/zipline/issues?q=is%3Aissue+is%3Aopen+label%3A%22Beginner+Friendly%22>`_ or `Help Wanted <https://github.com/quantopian/zipline/issues?q=is%3Aissue+is%3Aopen+label%3A%22Help+Wanted%22>`_.
+
+Feel free to ask questions on the `mailing list <https://groups.google.com/forum/#!forum/zipline>`_ or on `Gitter <https://gitter.im/quantopian/zipline>`_.
+
+
 
 .. |Gitter| image:: https://badges.gitter.im/Join%20Chat.svg
    :target: https://gitter.im/quantopian/zipline?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge
 .. |version status| image:: https://img.shields.io/pypi/pyversions/zipline.svg
    :target: https://pypi.python.org/pypi/zipline
-.. |downloads| image:: https://img.shields.io/pypi/dd/zipline.svg
-   :target: https://pypi.python.org/pypi/zipline
-.. |build status| image:: https://travis-ci.org/quantopian/zipline.png?branch=master
+.. |travis status| image:: https://travis-ci.org/quantopian/zipline.png?branch=master
    :target: https://travis-ci.org/quantopian/zipline
+.. |appveyor status| image:: https://ci.appveyor.com/api/projects/status/3dg18e6227dvstw6/branch/master?svg=true
+   :target: https://ci.appveyor.com/project/quantopian/zipline/branch/master
 .. |Coverage Status| image:: https://coveralls.io/repos/quantopian/zipline/badge.png
    :target: https://coveralls.io/r/quantopian/zipline
-.. |Code quality| image:: https://scrutinizer-ci.com/g/quantopian/zipline/badges/quality-score.png?b=master
-   :target: https://scrutinizer-ci.com/g/quantopian/zipline/
 
 .. _`Zipline Install Documentation` : http://www.zipline.io/install.html

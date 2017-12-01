@@ -1,41 +1,77 @@
 from .factor import (
-    Factor,
     CustomFactor,
+    Factor,
+    Latest,
+    RecarrayField,
 )
-from .latest import Latest
-from .events import (
-    BusinessDaysSincePreviousEarnings,
-    BusinessDaysUntilNextEarnings,
-)
-from .technical import (
-    DollarVolume,
+from .basic import (
+    AnnualizedVolatility,
+    AverageDollarVolume,
+    DailyReturns,
     EWMA,
-    EWMSTD,
     ExponentialWeightedMovingAverage,
     ExponentialWeightedMovingStdDev,
+    EWMSTD,
+    LinearWeightedMovingAverage,
     MaxDrawdown,
-    RSI,
     Returns,
     SimpleMovingAverage,
     VWAP,
     WeightedAverageValue,
 )
+from .events import (
+    BusinessDaysSincePreviousEvent,
+    BusinessDaysUntilNextEvent,
+)
+from .statistical import (
+    RollingLinearRegressionOfReturns,
+    RollingPearsonOfReturns,
+    RollingSpearmanOfReturns,
+    SimpleBeta,
+)
+from .technical import (
+    Aroon,
+    BollingerBands,
+    FastStochasticOscillator,
+    IchimokuKinkoHyo,
+    MACDSignal,
+    MovingAverageConvergenceDivergenceSignal,
+    RateOfChangePercentage,
+    RSI,
+    TrueRange,
+)
 
 __all__ = [
-    'BusinessDaysSincePreviousEarnings',
-    'BusinessDaysUntilNextEarnings',
+    'AnnualizedVolatility',
+    'Aroon',
+    'AverageDollarVolume',
+    'BollingerBands',
+    'BusinessDaysSincePreviousEvent',
+    'BusinessDaysUntilNextEvent',
     'CustomFactor',
-    'DollarVolume',
+    'DailyReturns',
     'EWMA',
     'EWMSTD',
     'ExponentialWeightedMovingAverage',
     'ExponentialWeightedMovingStdDev',
     'Factor',
+    'FastStochasticOscillator',
+    'IchimokuKinkoHyo',
     'Latest',
+    'LinearWeightedMovingAverage',
+    'MACDSignal',
     'MaxDrawdown',
-    'RSI',
+    'MovingAverageConvergenceDivergenceSignal',
+    'RateOfChangePercentage',
+    'RecarrayField',
     'Returns',
+    'RollingLinearRegressionOfReturns',
+    'RollingPearsonOfReturns',
+    'RollingSpearmanOfReturns',
+    'RSI',
+    'SimpleBeta',
     'SimpleMovingAverage',
+    'TrueRange',
     'VWAP',
     'WeightedAverageValue',
 ]

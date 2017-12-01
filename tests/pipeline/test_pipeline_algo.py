@@ -1,7 +1,6 @@
 """
 Tests for Algorithms using the Pipeline API.
 """
-from unittest import TestCase
 from os.path import (
     dirname,
     join,
@@ -9,6 +8,7 @@ from os.path import (
 )
 
 from nose_parameterized import parameterized
+import numpy as np
 from numpy import (
     array,
     arange,
@@ -18,18 +18,17 @@ from numpy import (
     uint32,
 )
 from numpy.testing import assert_almost_equal
+import pandas as pd
 from pandas import (
     concat,
     DataFrame,
     date_range,
-    DatetimeIndex,
-    Panel,
     read_csv,
     Series,
     Timestamp,
 )
+from pandas.tseries.tools import normalize_date
 from six import iteritems, itervalues
-from testfixtures import TempDirectory
 
 from zipline.algorithm import TradingAlgorithm
 from zipline.api import (
@@ -41,14 +40,8 @@ from zipline.errors import (
     AttachPipelineAfterInitialize,
     PipelineOutputDuringInitialize,
     NoSuchPipeline,
+    DuplicatePipelineName,
 )
-from zipline.data.us_equity_pricing import (
-    BcolzDailyBarReader,
-    DailyBarWriterFromCSVs,
-    SQLiteAdjustmentWriter,
-    SQLiteAdjustmentReader,
-)
-from zipline.finance import trading
 from zipline.lib.adjustment import MULTIPLY
 from zipline.pipeline import Pipeline
 from zipline.pipeline.factors import VWAP
@@ -57,15 +50,20 @@ from zipline.pipeline.loaders.frame import DataFrameLoader
 from zipline.pipeline.loaders.equity_pricing_loader import (
     USEquityPricingLoader,
 )
-from zipline.utils.test_utils import (
-    make_simple_equity_info,
-    str_to_seconds,
+from zipline.testing import (
+    str_to_seconds
 )
-from zipline.utils.tradingcalendar import (
-    trading_day,
-    trading_days,
+from zipline.testing import (
+    create_empty_splits_mergers_frame,
+    FakeDataPortal,
 )
-
+from zipline.testing.fixtures import (
+    WithAdjustmentReader,
+    WithBcolzEquityDailyBarReaderFromCSVs,
+    WithDataPortal,
+    ZiplineTestCase,
+)
+from zipline.utils.calendars import get_calendar
 
 TEST_RESOURCE_PATH = join(
     dirname(dirname(realpath(__file__))),  # zipline_repo/tests
@@ -87,73 +85,102 @@ def rolling_vwap(df, length):
     return Series(out, index=df.index)
 
 
-class ClosesOnly(TestCase):
+class ClosesAndVolumes(WithDataPortal, ZiplineTestCase):
+    sids = 1, 2, 3
+    START_DATE = pd.Timestamp('2014-01-01', tz='utc')
+    END_DATE = pd.Timestamp('2014-02-01', tz='utc')
+    dates = date_range(START_DATE, END_DATE, freq=get_calendar("NYSE").day,
+                       tz='utc')
 
-    def setUp(self):
-        self.env = env = trading.TradingEnvironment()
-        self.dates = date_range(
-            '2014-01-01', '2014-02-01', freq=trading_day, tz='UTC'
-        )
-        asset_info = DataFrame.from_records([
+    @classmethod
+    def make_equity_info(cls):
+        cls.equity_info = ret = DataFrame.from_records([
             {
                 'sid': 1,
                 'symbol': 'A',
-                'start_date': self.dates[10],
-                'end_date': self.dates[13],
+                'start_date': cls.dates[10],
+                'end_date': cls.dates[13],
                 'exchange': 'TEST',
             },
             {
                 'sid': 2,
                 'symbol': 'B',
-                'start_date': self.dates[11],
-                'end_date': self.dates[14],
+                'start_date': cls.dates[11],
+                'end_date': cls.dates[14],
                 'exchange': 'TEST',
             },
             {
                 'sid': 3,
                 'symbol': 'C',
-                'start_date': self.dates[12],
-                'end_date': self.dates[15],
+                'start_date': cls.dates[12],
+                'end_date': cls.dates[15],
                 'exchange': 'TEST',
             },
         ])
-        self.first_asset_start = min(asset_info.start_date)
-        self.last_asset_end = max(asset_info.end_date)
-        env.write_data(equities_df=asset_info)
-        self.asset_finder = finder = env.asset_finder
+        return ret
 
-        sids = (1, 2, 3)
-        self.assets = finder.retrieve_all(sids)
-
-        # View of the baseline data.
-        self.closes = DataFrame(
-            {sid: arange(1, len(self.dates) + 1) * sid for sid in sids},
-            index=self.dates,
+    @classmethod
+    def make_equity_daily_bar_data(cls):
+        cls.closes = DataFrame(
+            {sid: arange(1, len(cls.dates) + 1) * sid for sid in cls.sids},
+            index=cls.dates,
             dtype=float,
         )
+        cls.volumes = cls.closes * 1000
+        for sid in cls.sids:
+            yield sid, DataFrame(
+                {
+                    'open': cls.closes[sid].values,
+                    'high': cls.closes[sid].values,
+                    'low': cls.closes[sid].values,
+                    'close': cls.closes[sid].values,
+                    'volume': cls.volumes[sid].values,
+                },
+                index=cls.dates,
+            )
+
+    @classmethod
+    def init_class_fixtures(cls):
+        super(ClosesAndVolumes, cls).init_class_fixtures()
+        cls.first_asset_start = min(cls.equity_info.start_date)
+        cls.last_asset_end = max(cls.equity_info.end_date)
+        cls.assets = cls.asset_finder.retrieve_all(cls.sids)
+
+        cls.trading_day = cls.trading_calendar.day
 
         # Add a split for 'A' on its second date.
-        self.split_asset = self.assets[0]
-        self.split_date = self.split_asset.start_date + trading_day
-        self.split_ratio = 0.5
-        self.adjustments = DataFrame.from_records([
+        cls.split_asset = cls.assets[0]
+        cls.split_date = cls.split_asset.start_date + cls.trading_day
+        cls.split_ratio = 0.5
+        cls.adjustments = DataFrame.from_records([
             {
-                'sid': self.split_asset.sid,
-                'value': self.split_ratio,
+                'sid': cls.split_asset.sid,
+                'value': cls.split_ratio,
                 'kind': MULTIPLY,
                 'start_date': Timestamp('NaT'),
-                'end_date': self.split_date,
-                'apply_date': self.split_date,
+                'end_date': cls.split_date,
+                'apply_date': cls.split_date,
             }
         ])
+
+    def init_instance_fixtures(self):
+        super(ClosesAndVolumes, self).init_instance_fixtures()
 
         # View of the data on/after the split.
         self.adj_closes = adj_closes = self.closes.copy()
         adj_closes.ix[:self.split_date, self.split_asset] *= self.split_ratio
+        self.adj_volumes = adj_volumes = self.volumes.copy()
+        adj_volumes.ix[:self.split_date, self.split_asset] *= self.split_ratio
 
-        self.pipeline_loader = DataFrameLoader(
+        self.pipeline_close_loader = DataFrameLoader(
             column=USEquityPricing.close,
             baseline=self.closes,
+            adjustments=self.adjustments,
+        )
+
+        self.pipeline_volume_loader = DataFrameLoader(
+            column=USEquityPricing.volume,
+            baseline=self.volumes,
             adjustments=self.adjustments,
         )
 
@@ -162,6 +189,13 @@ class ClosesOnly(TestCase):
             lookup = self.closes
         else:
             lookup = self.adj_closes
+        return lookup.loc[date, asset]
+
+    def expected_volume(self, date, asset):
+        if date < self.split_date:
+            lookup = self.volumes
+        else:
+            lookup = self.adj_volumes
         return lookup.loc[date, asset]
 
     def exists(self, date, asset):
@@ -182,14 +216,14 @@ class ClosesOnly(TestCase):
             initialize=initialize,
             handle_data=late_attach,
             data_frequency='daily',
-            get_pipeline_loader=lambda column: self.pipeline_loader,
-            start=self.first_asset_start - trading_day,
-            end=self.last_asset_end + trading_day,
+            get_pipeline_loader=lambda column: self.pipeline_close_loader,
+            start=self.first_asset_start - self.trading_day,
+            end=self.last_asset_end + self.trading_day,
             env=self.env,
         )
 
         with self.assertRaises(AttachPipelineAfterInitialize):
-            algo.run(source=self.closes)
+            algo.run(self.data_portal)
 
         def barf(context, data):
             raise AssertionError("Shouldn't make it past before_trading_start")
@@ -199,14 +233,14 @@ class ClosesOnly(TestCase):
             before_trading_start=late_attach,
             handle_data=barf,
             data_frequency='daily',
-            get_pipeline_loader=lambda column: self.pipeline_loader,
-            start=self.first_asset_start - trading_day,
-            end=self.last_asset_end + trading_day,
+            get_pipeline_loader=lambda column: self.pipeline_close_loader,
+            start=self.first_asset_start - self.trading_day,
+            end=self.last_asset_end + self.trading_day,
             env=self.env,
         )
 
         with self.assertRaises(AttachPipelineAfterInitialize):
-            algo.run(source=self.closes)
+            algo.run(self.data_portal)
 
     def test_pipeline_output_after_initialize(self):
         """
@@ -228,14 +262,14 @@ class ClosesOnly(TestCase):
             handle_data=handle_data,
             before_trading_start=before_trading_start,
             data_frequency='daily',
-            get_pipeline_loader=lambda column: self.pipeline_loader,
-            start=self.first_asset_start - trading_day,
-            end=self.last_asset_end + trading_day,
+            get_pipeline_loader=lambda column: self.pipeline_close_loader,
+            start=self.first_asset_start - self.trading_day,
+            end=self.last_asset_end + self.trading_day,
             env=self.env,
         )
 
         with self.assertRaises(PipelineOutputDuringInitialize):
-            algo.run(source=self.closes)
+            algo.run(self.data_portal)
 
     def test_get_output_nonexistent_pipeline(self):
         """
@@ -256,34 +290,46 @@ class ClosesOnly(TestCase):
             handle_data=handle_data,
             before_trading_start=before_trading_start,
             data_frequency='daily',
-            get_pipeline_loader=lambda column: self.pipeline_loader,
-            start=self.first_asset_start - trading_day,
-            end=self.last_asset_end + trading_day,
+            get_pipeline_loader=lambda column: self.pipeline_close_loader,
+            start=self.first_asset_start - self.trading_day,
+            end=self.last_asset_end + self.trading_day,
             env=self.env,
         )
 
         with self.assertRaises(NoSuchPipeline):
-            algo.run(source=self.closes)
+            algo.run(self.data_portal)
 
     @parameterized.expand([('default', None),
                            ('day', 1),
                            ('week', 5),
                            ('year', 252),
-                           ('all_but_one_day', 'all_but_one_day')])
-    def test_assets_appear_on_correct_days(self, test_name, chunksize):
+                           ('all_but_one_day', 'all_but_one_day'),
+                           ('custom_iter', 'custom_iter')])
+    def test_assets_appear_on_correct_days(self, test_name, chunks):
         """
         Assert that assets appear at correct times during a backtest, with
         correctly-adjusted close price values.
         """
 
-        if chunksize == 'all_but_one_day':
-            chunksize = (
+        if chunks == 'all_but_one_day':
+            chunks = (
                 self.dates.get_loc(self.last_asset_end) -
                 self.dates.get_loc(self.first_asset_start)
             ) - 1
+        elif chunks == 'custom_iter':
+            chunks = []
+            st = np.random.RandomState(12345)
+            remaining = (
+                self.dates.get_loc(self.last_asset_end) -
+                self.dates.get_loc(self.first_asset_start)
+            )
+            while remaining > 0:
+                chunk = st.randint(3)
+                chunks.append(chunk)
+                remaining -= chunk
 
         def initialize(context):
-            p = attach_pipeline(Pipeline(), 'test', chunksize=chunksize)
+            p = attach_pipeline(Pipeline(), 'test', chunks=chunks)
             p.add(USEquityPricing.close.latest, 'close')
 
         def handle_data(context, data):
@@ -292,7 +338,7 @@ class ClosesOnly(TestCase):
             for asset in self.assets:
                 # Assets should appear iff they exist today and yesterday.
                 exists_today = self.exists(date, asset)
-                existed_yesterday = self.exists(date - trading_day, asset)
+                existed_yesterday = self.exists(date - self.trading_day, asset)
                 if exists_today and existed_yesterday:
                     latest = results.loc[asset, 'close']
                     self.assertEqual(latest, self.expected_close(date, asset))
@@ -306,117 +352,161 @@ class ClosesOnly(TestCase):
             handle_data=handle_data,
             before_trading_start=before_trading_start,
             data_frequency='daily',
-            get_pipeline_loader=lambda column: self.pipeline_loader,
+            get_pipeline_loader=lambda column: self.pipeline_close_loader,
             start=self.first_asset_start,
             end=self.last_asset_end,
             env=self.env,
         )
 
         # Run for a week in the middle of our data.
-        algo.run(source=self.closes.loc[self.first_asset_start:
-                                        self.last_asset_end])
+        algo.run(self.data_portal)
+
+    def test_multiple_pipelines(self):
+        """
+        Test that we can attach multiple pipelines and access the correct
+        output based on the pipeline name.
+        """
+        def initialize(context):
+            pipeline_close = attach_pipeline(Pipeline(), 'test_close')
+            pipeline_volume = attach_pipeline(Pipeline(), 'test_volume')
+
+            pipeline_close.add(USEquityPricing.close.latest, 'close')
+            pipeline_volume.add(USEquityPricing.volume.latest, 'volume')
+
+        def handle_data(context, data):
+            closes = pipeline_output('test_close')
+            volumes = pipeline_output('test_volume')
+            date = get_datetime().normalize()
+            for asset in self.assets:
+                # Assets should appear iff they exist today and yesterday.
+                exists_today = self.exists(date, asset)
+                existed_yesterday = self.exists(date - self.trading_day, asset)
+                if exists_today and existed_yesterday:
+                    self.assertEqual(
+                        closes.loc[asset, 'close'],
+                        self.expected_close(date, asset)
+                    )
+                    self.assertEqual(
+                        volumes.loc[asset, 'volume'],
+                        self.expected_volume(date, asset)
+                    )
+                else:
+                    self.assertNotIn(asset, closes.index)
+                    self.assertNotIn(asset, volumes.index)
+
+        column_to_loader = {
+            USEquityPricing.close: self.pipeline_close_loader,
+            USEquityPricing.volume: self.pipeline_volume_loader,
+        }
+
+        algo = TradingAlgorithm(
+            initialize=initialize,
+            handle_data=handle_data,
+            data_frequency='daily',
+            get_pipeline_loader=lambda column: column_to_loader[column],
+            start=self.first_asset_start,
+            end=self.last_asset_end,
+            env=self.env,
+        )
+
+        algo.run(self.data_portal)
+
+    def test_duplicate_pipeline_names(self):
+        """
+        Test that we raise an error when we try to attach a pipeline with a
+        name that already exists for another attached pipeline.
+        """
+        def initialize(context):
+            attach_pipeline(Pipeline(), 'test')
+            attach_pipeline(Pipeline(), 'test')
+
+        algo = TradingAlgorithm(
+            initialize=initialize,
+            data_frequency='daily',
+            get_pipeline_loader=lambda column: self.pipeline_close_loader,
+            start=self.first_asset_start,
+            end=self.last_asset_end,
+            env=self.env,
+        )
+
+        with self.assertRaises(DuplicatePipelineName):
+            algo.run(self.data_portal)
 
 
 class MockDailyBarSpotReader(object):
     """
     A BcolzDailyBarReader which returns a constant value for spot price.
     """
-    def spot_price(self, sid, day, column):
+    def get_value(self, sid, day, column):
         return 100.0
 
 
-class PipelineAlgorithmTestCase(TestCase):
+class PipelineAlgorithmTestCase(WithBcolzEquityDailyBarReaderFromCSVs,
+                                WithAdjustmentReader,
+                                ZiplineTestCase):
+    AAPL = 1
+    MSFT = 2
+    BRK_A = 3
+    ASSET_FINDER_EQUITY_SIDS = AAPL, MSFT, BRK_A
+    ASSET_FINDER_EQUITY_SYMBOLS = 'AAPL', 'MSFT', 'BRK_A'
+    START_DATE = Timestamp('2014')
+    END_DATE = Timestamp('2015')
 
     @classmethod
-    def setUpClass(cls):
-        cls.AAPL = 1
-        cls.MSFT = 2
-        cls.BRK_A = 3
-        cls.assets = [cls.AAPL, cls.MSFT, cls.BRK_A]
-        asset_info = make_simple_equity_info(
-            cls.assets,
-            Timestamp('2014'),
-            Timestamp('2015'),
-            ['AAPL', 'MSFT', 'BRK_A'],
-        )
-        cls.env = trading.TradingEnvironment()
-        cls.env.write_data(equities_df=asset_info)
-        cls.tempdir = tempdir = TempDirectory()
-        tempdir.create()
-        try:
-            cls.raw_data, cls.bar_reader = cls.create_bar_reader(tempdir)
-            cls.adj_reader = cls.create_adjustment_reader(tempdir)
-            cls.pipeline_loader = USEquityPricingLoader(
-                cls.bar_reader, cls.adj_reader
-            )
-        except:
-            cls.tempdir.cleanup()
-            raise
-
-        cls.dates = cls.raw_data[cls.AAPL].index.tz_localize('UTC')
-        cls.AAPL_split_date = Timestamp("2014-06-09", tz='UTC')
-
-    @classmethod
-    def tearDownClass(cls):
-        del cls.env
-        cls.tempdir.cleanup()
-
-    @classmethod
-    def create_bar_reader(cls, tempdir):
+    def make_equity_daily_bar_data(cls):
         resources = {
             cls.AAPL: join(TEST_RESOURCE_PATH, 'AAPL.csv'),
             cls.MSFT: join(TEST_RESOURCE_PATH, 'MSFT.csv'),
             cls.BRK_A: join(TEST_RESOURCE_PATH, 'BRK-A.csv'),
         }
-        raw_data = {
+        cls.raw_data = raw_data = {
             asset: read_csv(path, parse_dates=['day']).set_index('day')
-            for asset, path in iteritems(resources)
+            for asset, path in resources.items()
         }
         # Add 'price' column as an alias because all kinds of stuff in zipline
         # depends on it being present. :/
         for frame in raw_data.values():
             frame['price'] = frame['close']
 
-        writer = DailyBarWriterFromCSVs(resources)
-        data_path = tempdir.getpath('testdata.bcolz')
-        table = writer.write(data_path, trading_days, cls.assets)
-        return raw_data, BcolzDailyBarReader(table)
+        return resources
 
     @classmethod
-    def create_adjustment_reader(cls, tempdir):
-        dbpath = tempdir.getpath('adjustments.sqlite')
-        writer = SQLiteAdjustmentWriter(dbpath, cls.env.trading_days,
-                                        MockDailyBarSpotReader())
-        splits = DataFrame.from_records([
+    def make_splits_data(cls):
+        return DataFrame.from_records([
             {
                 'effective_date': str_to_seconds('2014-06-09'),
                 'ratio': (1 / 7.0),
                 'sid': cls.AAPL,
             }
         ])
-        mergers = DataFrame(
-            {
-                # Hackery to make the dtypes correct on an empty frame.
-                'effective_date': array([], dtype=int),
-                'ratio': array([], dtype=float),
-                'sid': array([], dtype=int),
-            },
-            index=DatetimeIndex([], tz='UTC'),
-            columns=['effective_date', 'ratio', 'sid'],
-        )
-        dividends = DataFrame({
-            'sid': array([], dtype=uint32),
-            'amount': array([], dtype=float64),
-            'record_date': array([], dtype='datetime64[ns]'),
-            'ex_date': array([], dtype='datetime64[ns]'),
-            'declared_date': array([], dtype='datetime64[ns]'),
-            'pay_date': array([], dtype='datetime64[ns]'),
-        })
-        writer.write(splits, mergers, dividends)
-        return SQLiteAdjustmentReader(dbpath)
 
-    def make_source(self):
-        return Panel(self.raw_data).tz_localize('UTC', axis=1)
+    @classmethod
+    def make_mergers_data(cls):
+        return create_empty_splits_mergers_frame()
+
+    @classmethod
+    def make_dividends_data(cls):
+        return pd.DataFrame(array([], dtype=[
+            ('sid', uint32),
+            ('amount', float64),
+            ('record_date', 'datetime64[ns]'),
+            ('ex_date', 'datetime64[ns]'),
+            ('declared_date', 'datetime64[ns]'),
+            ('pay_date', 'datetime64[ns]'),
+        ]))
+
+    @classmethod
+    def init_class_fixtures(cls):
+        super(PipelineAlgorithmTestCase, cls).init_class_fixtures()
+        cls.pipeline_loader = USEquityPricingLoader(
+            cls.bcolz_equity_daily_bar_reader,
+            cls.adjustment_reader,
+        )
+        cls.dates = cls.raw_data[cls.AAPL].index.tz_localize('UTC')
+        cls.AAPL_split_date = Timestamp("2014-06-09", tz='UTC')
+        cls.assets = cls.asset_finder.retrieve_all(
+            cls.ASSET_FINDER_EQUITY_SIDS
+        )
 
     def compute_expected_vwaps(self, window_lengths):
         AAPL, MSFT, BRK_A = self.AAPL, self.MSFT, self.BRK_A
@@ -451,7 +541,7 @@ class PipelineAlgorithmTestCase(TestCase):
                         raw_vwap[:split_loc - 1],
                         adj_vwap[split_loc - 1:]
                     ]
-                ).shift(1, trading_day)
+                ).shift(1, self.trading_calendar.day)
 
         # Make sure all the expected vwaps have the same dates.
         vwap_dates = vwaps[1][self.AAPL].index
@@ -463,11 +553,13 @@ class PipelineAlgorithmTestCase(TestCase):
         # Spot check expectations near the AAPL split.
         # length 1 vwap for the morning before the split should be the close
         # price of the previous day.
-        before_split = vwaps[1][AAPL].loc[split_date - trading_day]
+        before_split = vwaps[1][AAPL].loc[split_date -
+                                          self.trading_calendar.day]
         assert_almost_equal(before_split, 647.3499, decimal=2)
         assert_almost_equal(
             before_split,
-            raw[AAPL].loc[split_date - (2 * trading_day), 'close'],
+            raw[AAPL].loc[split_date - (2 * self.trading_calendar.day),
+                          'close'],
             decimal=2,
         )
 
@@ -477,13 +569,15 @@ class PipelineAlgorithmTestCase(TestCase):
         assert_almost_equal(on_split, 645.5700 / split_ratio, decimal=2)
         assert_almost_equal(
             on_split,
-            raw[AAPL].loc[split_date - trading_day, 'close'] / split_ratio,
+            raw[AAPL].loc[split_date -
+                          self.trading_calendar.day, 'close'] / split_ratio,
             decimal=2,
         )
 
         # length 1 vwap on the day after the split should be the as-traded
         # close on the split day.
-        after_split = vwaps[1][AAPL].loc[split_date + trading_day]
+        after_split = vwaps[1][AAPL].loc[split_date +
+                                         self.trading_calendar.day]
         assert_almost_equal(after_split, 93.69999, decimal=2)
         assert_almost_equal(
             after_split,
@@ -498,7 +592,7 @@ class PipelineAlgorithmTestCase(TestCase):
         (False,),
     ])
     def test_handle_adjustment(self, set_screen):
-        AAPL, MSFT, BRK_A = assets = self.AAPL, self.MSFT, self.BRK_A
+        AAPL, MSFT, BRK_A = assets = self.assets
 
         window_lengths = [1, 2, 5, 10]
         vwaps = self.compute_expected_vwaps(window_lengths)
@@ -523,7 +617,7 @@ class PipelineAlgorithmTestCase(TestCase):
             attach_pipeline(pipeline, 'test')
 
         def handle_data(context, data):
-            today = get_datetime()
+            today = normalize_date(get_datetime())
             results = pipeline_output('test')
             expect_over_300 = {
                 AAPL: today < self.AAPL_split_date,
@@ -531,7 +625,6 @@ class PipelineAlgorithmTestCase(TestCase):
                 BRK_A: True,
             }
             for asset in assets:
-
                 should_pass_filter = expect_over_300[asset]
                 if set_screen and not should_pass_filter:
                     self.assertNotIn(asset, results.index)
@@ -561,8 +654,96 @@ class PipelineAlgorithmTestCase(TestCase):
         )
 
         algo.run(
-            source=self.make_source(),
+            FakeDataPortal(self.env),
             # Yes, I really do want to use the start and end dates I passed to
             # TradingAlgorithm.
             overwrite_sim_params=False,
         )
+
+    def test_empty_pipeline(self):
+
+        # For ensuring we call before_trading_start.
+        count = [0]
+
+        def initialize(context):
+            pipeline = attach_pipeline(Pipeline(), 'test')
+
+            vwap = VWAP(window_length=10)
+            pipeline.add(vwap, 'vwap')
+
+            # Nothing should have prices less than 0.
+            pipeline.set_screen(vwap < 0)
+
+        def handle_data(context, data):
+            pass
+
+        def before_trading_start(context, data):
+            context.results = pipeline_output('test')
+            self.assertTrue(context.results.empty)
+            count[0] += 1
+
+        algo = TradingAlgorithm(
+            initialize=initialize,
+            handle_data=handle_data,
+            before_trading_start=before_trading_start,
+            data_frequency='daily',
+            get_pipeline_loader=lambda column: self.pipeline_loader,
+            start=self.dates[0],
+            end=self.dates[-1],
+            env=self.env,
+        )
+
+        algo.run(
+            FakeDataPortal(self.env),
+            overwrite_sim_params=False,
+        )
+
+        self.assertTrue(count[0] > 0)
+
+    def test_pipeline_beyond_daily_bars(self):
+        """
+        Ensure that we can run an algo with pipeline beyond the max date
+        of the daily bars.
+        """
+
+        # For ensuring we call before_trading_start.
+        count = [0]
+
+        current_day = self.trading_calendar.next_session_label(
+            self.pipeline_loader.raw_price_loader.last_available_dt,
+        )
+
+        def initialize(context):
+            pipeline = attach_pipeline(Pipeline(), 'test')
+
+            vwap = VWAP(window_length=10)
+            pipeline.add(vwap, 'vwap')
+
+            # Nothing should have prices less than 0.
+            pipeline.set_screen(vwap < 0)
+
+        def handle_data(context, data):
+            pass
+
+        def before_trading_start(context, data):
+            context.results = pipeline_output('test')
+            self.assertTrue(context.results.empty)
+            count[0] += 1
+
+        algo = TradingAlgorithm(
+            initialize=initialize,
+            handle_data=handle_data,
+            before_trading_start=before_trading_start,
+            data_frequency='daily',
+            get_pipeline_loader=lambda column: self.pipeline_loader,
+            start=self.dates[0],
+            end=current_day,
+            env=self.env,
+        )
+
+        algo.run(
+            FakeDataPortal(self.env),
+            overwrite_sim_params=False,
+        )
+
+        self.assertTrue(count[0] > 0)

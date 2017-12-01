@@ -8,17 +8,17 @@ from numbers import Number
 import numexpr
 from numexpr.necompiler import getExprNames
 from numpy import (
-    empty,
+    full,
     inf,
 )
 
-from zipline.pipeline.term import Term, CompositeTerm
+from zipline.pipeline.term import Term, ComputableTerm
 
 
 _VARIABLE_NAME_RE = re.compile("^(x_)([0-9]+)$")
 
 # Map from op symbol to equivalent Python magic method name.
-_ops_to_methods = {
+ops_to_methods = {
     '+': '__add__',
     '-': '__sub__',
     '*': '__mul__',
@@ -35,9 +35,12 @@ _ops_to_methods = {
     '>=': '__ge__',
     '>': '__gt__',
 }
+# Map from method name to op symbol.
+methods_to_ops = {v: k for k, v in ops_to_methods.items()}
+
 # Map from op symbol to equivalent Python magic method name after flipping
 # arguments.
-_ops_to_commuted_methods = {
+ops_to_commuted_methods = {
     '+': '__radd__',
     '-': '__rsub__',
     '*': '__rmul__',
@@ -54,7 +57,7 @@ _ops_to_commuted_methods = {
     '>=': '__le__',
     '>': '__lt__',
 }
-_unary_ops_to_methods = {
+unary_ops_to_methods = {
     '-': '__neg__',
     '~': '__invert__',
 }
@@ -152,19 +155,19 @@ def method_name_for_op(op, commute=False):
     '__lt__'
     """
     if commute:
-        return _ops_to_commuted_methods[op]
-    return _ops_to_methods[op]
+        return ops_to_commuted_methods[op]
+    return ops_to_methods[op]
 
 
 def unary_op_name(op):
-    return _unary_ops_to_methods[op]
+    return unary_ops_to_methods[op]
 
 
 def is_comparison(op):
     return op in COMPARISONS
 
 
-class NumericalExpression(CompositeTerm):
+class NumericalExpression(ComputableTerm):
     """
     Term binding to a numexpr expression.
 
@@ -187,6 +190,7 @@ class NumericalExpression(CompositeTerm):
             inputs=binds,
             expr=expr,
             dtype=dtype,
+            window_safe=all(t.window_safe for t in binds),
         )
 
     def _init(self, expr, *args, **kwargs):
@@ -194,9 +198,9 @@ class NumericalExpression(CompositeTerm):
         return super(NumericalExpression, self)._init(*args, **kwargs)
 
     @classmethod
-    def static_identity(cls, expr, *args, **kwargs):
+    def _static_identity(cls, expr, *args, **kwargs):
         return (
-            super(NumericalExpression, cls).static_identity(*args, **kwargs),
+            super(NumericalExpression, cls)._static_identity(*args, **kwargs),
             expr,
         )
 
@@ -223,13 +227,13 @@ class NumericalExpression(CompositeTerm):
                     expected_indices, expr_indices,
                 )
             )
-        return super(NumericalExpression, self)._validate()
+        super(NumericalExpression, self)._validate()
 
     def _compute(self, arrays, dates, assets, mask):
         """
         Compute our stored expression string with numexpr.
         """
-        out = empty(mask.shape, dtype=self.dtype)
+        out = full(mask.shape, self.missing_value, dtype=self.dtype)
         # This writes directly into our output buffer.
         numexpr.evaluate(
             self._expr,
@@ -248,7 +252,18 @@ class NumericalExpression(CompositeTerm):
         new_inputs.
         """
         expr = self._expr
-        for idx, input_ in enumerate(self.inputs):
+
+        # If we have 11+ variables, some of our variable names may be
+        # substrings of other variable names. For example, we might have x_1,
+        # x_10, and x_100. By enumerating in reverse order, we ensure that
+        # every variable name which is a substring of another variable name is
+        # processed after the variable of which it is a substring. This
+        # guarantees that the substitution of any given variable index only
+        # ever affects exactly its own index. For example, if we have variables
+        # with indices going up to 100, we will process all of the x_1xx names
+        # before x_1x, which will be before x_1, so the substitution of x_1
+        # will not affect x_1x, which will not affect x_1xx.
+        for idx, input_ in reversed(list(enumerate(self.inputs))):
             old_varname = "x_%d" % idx
             # Temporarily rebind to x_temp_N so that we don't overwrite the
             # same value multiple times.
@@ -304,6 +319,7 @@ class NumericalExpression(CompositeTerm):
         )
 
     def short_repr(self):
+        """Short repr to use when rendering Pipeline graphs."""
         return "Expression: {expr}".format(
             typename=type(self).__name__,
             expr=self._expr,

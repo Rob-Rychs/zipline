@@ -1,12 +1,12 @@
 from __future__ import print_function
 from zipline.assets import AssetFinder
 
-from .classifier import Classifier
+from .classifiers import Classifier, CustomClassifier
 from .engine import SimplePipelineEngine
 from .factors import Factor, CustomFactor
-from .filters import Filter
+from .filters import Filter, CustomFilter
 from .term import Term
-from .graph import TermGraph
+from .graph import ExecutionPlan, TermGraph
 from .pipeline import Pipeline
 from .loaders import USEquityPricingLoader
 
@@ -35,9 +35,6 @@ def engine_from_files(daily_bar_path,
         memory consumption.  Default is False
     """
     loader = USEquityPricingLoader.from_files(daily_bar_path, adjustments_path)
-
-    if not asset_db_path.startswith("sqlite:"):
-        asset_db_path = "sqlite:///" + asset_db_path
     asset_finder = AssetFinder(asset_db_path)
     if warmup_assets:
         results = asset_finder.retrieve_all(asset_finder.sids)
@@ -53,7 +50,10 @@ def engine_from_files(daily_bar_path,
 __all__ = (
     'Classifier',
     'CustomFactor',
+    'CustomFilter',
+    'CustomClassifier',
     'engine_from_files',
+    'ExecutionPlan',
     'Factor',
     'Filter',
     'Pipeline',
